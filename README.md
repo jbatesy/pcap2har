@@ -29,12 +29,8 @@ pip install -r requirements.txt
 
 ## CLI usage
 
-Run as a module (preferred) or via the shim script:
-
 ```bash
 python -m pcap2har PCAP_FILE [options]
-# or
-python main.py PCAP_FILE [options]
 ```
 
 Key options:
