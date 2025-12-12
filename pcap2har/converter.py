@@ -36,7 +36,7 @@ from .har import (
     parse_set_cookie_header,
     timestamp_to_iso8601,
 )
-from .pcap_parser import PcapParser, TsharkNotFoundError
+from .pcap_parser import PcapParser
 
 
 class TransactionConverter:
