@@ -1,0 +1,256 @@
+"""
+Data models for HTTP/1.x requests, responses, and transactions.
+"""
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+from urllib.parse import urlparse, parse_qs, urljoin
+import gzip
+import json
+import re
+
+
+@dataclass
+class HTTPRequest:
+    """Represents an HTTP/1.x request."""
+    
+    method: str = ""
+    path: str = ""
+    version: str = "HTTP/1.1"
+    headers: Dict[str, str] = field(default_factory=dict)
+    body: bytes = b""
+    timestamp: float = 0.0
+    
+    # Populated from Host header or context
+    host: str = ""
+    port: int = 80
+    scheme: str = "http"
+    
+    @property
+    def url(self) -> str:
+        """Get the full URL."""
+        if self.host:
+            port_str = f":{self.port}" if (self.scheme == "http" and self.port != 80) or (self.scheme == "https" and self.port != 443) else ""
+            return f"{self.scheme}://{self.host}{port_str}{self.path}"
+        return self.path
+    
+    @property
+    def authority(self) -> str:
+        """Get host:port for compatibility with HTTP/2."""
+        if self.port and self.port not in (80, 443):
+            return f"{self.host}:{self.port}"
+        return self.host
+    
+    @property
+    def query_string(self) -> str:
+        """Get the query string portion of the path."""
+        if '?' in self.path:
+            return self.path.split('?', 1)[1]
+        return ""
+    
+    @property
+    def path_only(self) -> str:
+        """Get the path without query string."""
+        if '?' in self.path:
+            return self.path.split('?', 1)[0]
+        return self.path
+    
+    @property
+    def query_params(self) -> Dict[str, List[str]]:
+        """Parse query string into dict."""
+        return parse_qs(self.query_string)
+    
+    @property
+    def content_type(self) -> str:
+        """Get the Content-Type header."""
+        return self.headers.get('content-type', '')
+    
+    @property
+    def content_length(self) -> int:
+        """Get the Content-Length or body size."""
+        if 'content-length' in self.headers:
+            try:
+                return int(self.headers['content-length'])
+            except ValueError:
+                pass
+        return len(self.body)
+    
+    @property 
+    def is_json(self) -> bool:
+        """Check if the request body is JSON."""
+        return 'json' in self.content_type.lower()
+    
+    @property
+    def body_text(self) -> str:
+        """Get the body as text."""
+        try:
+            return self.body.decode('utf-8')
+        except UnicodeDecodeError:
+            return self.body.decode('utf-8', errors='replace')
+    
+    def json(self) -> Any:
+        """Parse the body as JSON."""
+        if not self.body:
+            return None
+        return json.loads(self.body_text)
+    
+    def get_header(self, name: str, default: str = "") -> str:
+        """Get a header by name (case-insensitive)."""
+        return self.headers.get(name.lower(), default)
+    
+    def __repr__(self) -> str:
+        return f"HTTPRequest({self.method} {self.url})"
+
+
+@dataclass
+class HTTPResponse:
+    """Represents an HTTP/1.x response."""
+    
+    status: int = 0
+    status_text: str = ""
+    version: str = "HTTP/1.1"
+    headers: Dict[str, str] = field(default_factory=dict)
+    body: bytes = b""
+    timestamp: float = 0.0
+    
+    @property
+    def ok(self) -> bool:
+        """Check if status is successful (2xx)."""
+        return 200 <= self.status < 300
+    
+    @property
+    def content_type(self) -> str:
+        """Get the Content-Type header."""
+        return self.headers.get('content-type', '')
+    
+    @property
+    def content_encoding(self) -> str:
+        """Get the Content-Encoding header."""
+        return self.headers.get('content-encoding', '')
+    
+    @property
+    def content_length(self) -> int:
+        """Get the Content-Length or body size."""
+        if 'content-length' in self.headers:
+            try:
+                return int(self.headers['content-length'])
+            except ValueError:
+                pass
+        return len(self.body)
+    
+    @property
+    def is_json(self) -> bool:
+        """Check if the response body is JSON."""
+        return 'json' in self.content_type.lower()
+    
+    @property
+    def is_html(self) -> bool:
+        """Check if the response body is HTML."""
+        return 'html' in self.content_type.lower()
+    
+    @property
+    def is_text(self) -> bool:
+        """Check if the response is text-based."""
+        ct = self.content_type.lower()
+        return any(t in ct for t in ['text', 'json', 'xml', 'javascript', 'css'])
+    
+    @property
+    def decompressed_body(self) -> bytes:
+        """Get the body, decompressing if necessary."""
+        return self._decompress(self.body, self.content_encoding)
+    
+    @property
+    def body_text(self) -> str:
+        """Get the body as text (decompressed)."""
+        body = self.decompressed_body
+        try:
+            return body.decode('utf-8')
+        except UnicodeDecodeError:
+            return body.decode('utf-8', errors='replace')
+    
+    def json(self) -> Any:
+        """Parse the body as JSON."""
+        if not self.body:
+            return None
+        return json.loads(self.body_text)
+    
+    def get_header(self, name: str, default: str = "") -> str:
+        """Get a header by name (case-insensitive)."""
+        return self.headers.get(name.lower(), default)
+    
+    def _decompress(self, body: bytes, encoding: str) -> bytes:
+        """Decompress body based on content-encoding."""
+        if not body:
+            return body
+        
+        if encoding == 'gzip':
+            # Check if actually gzip (magic bytes 1f 8b)
+            if body[:2] == b'\x1f\x8b':
+                try:
+                    return gzip.decompress(body)
+                except Exception:
+                    return body
+            return body  # Already decompressed by tshark
+        
+        elif encoding == 'br':
+            try:
+                import brotli
+                return brotli.decompress(body)
+            except (ImportError, Exception):
+                return body
+        
+        elif encoding == 'deflate':
+            import zlib
+            try:
+                return zlib.decompress(body)
+            except:
+                try:
+                    return zlib.decompress(body, -zlib.MAX_WBITS)
+                except:
+                    return body
+        
+        return body
+    
+    def __repr__(self) -> str:
+        return f"HTTPResponse({self.status} {self.status_text})"
+
+
+@dataclass
+class HTTPTransaction:
+    """Represents a complete HTTP/1.x request-response transaction."""
+    
+    tcp_stream: int
+    request: Optional[HTTPRequest] = None
+    response: Optional[HTTPResponse] = None
+    
+    @property
+    def url(self) -> str:
+        """Get the request URL."""
+        return self.request.url if self.request else ""
+    
+    @property
+    def method(self) -> str:
+        """Get the request method."""
+        return self.request.method if self.request else ""
+    
+    @property
+    def status(self) -> int:
+        """Get the response status."""
+        return self.response.status if self.response else 0
+    
+    @property
+    def duration_ms(self) -> float:
+        """Calculate transaction duration in milliseconds."""
+        if self.request and self.response:
+            return (self.response.timestamp - self.request.timestamp) * 1000
+        return 0.0
+    
+    @property
+    def complete(self) -> bool:
+        """Check if transaction has both request and response."""
+        return self.request is not None and self.response is not None
+    
+    def __repr__(self) -> str:
+        req = f"{self.method} {self.url}" if self.request else "No request"
+        resp = f"{self.status}" if self.response else "No response"
+        return f"HTTPTransaction(tcp={self.tcp_stream}, {req} -> {resp})"
