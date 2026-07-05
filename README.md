@@ -21,7 +21,7 @@ Common tshark installs:
 ## Installation
 
 ```bash
-git clone https://github.com/<your-org>/pcap2har.git
+git clone https://github.com/jbatesy/pcap2har.git
 cd pcap2har
 python -m venv .venv && source .venv/bin/activate  # optional but recommended
 pip install -r requirements.txt
